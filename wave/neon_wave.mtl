@@ -1,0 +1,33 @@
+# Stylized neon wave - materials
+# WaveBody   : saturated teal. In Studio set Material = Neon for a glowing look.
+# NeonRing   : pure neon cyan - set Material = Neon in Studio.
+# Foam       : white foam, smooth plastic looks good (Material = SmoothPlastic).
+# Puddle     : dark deep-water teal, Material = Glass or SmoothPlastic.
+
+newmtl WaveBody
+Ka 0.02 0.12 0.14
+Kd 0.07 0.72 0.82
+Ks 0.55 0.55 0.55
+Ns 90
+illum 2
+
+newmtl Foam
+Ka 0.10 0.10 0.10
+Kd 0.96 0.98 1.00
+Ks 0.25 0.25 0.25
+Ns 35
+illum 2
+
+newmtl Puddle
+Ka 0.01 0.05 0.07
+Kd 0.03 0.30 0.40
+Ks 0.60 0.60 0.60
+Ns 70
+illum 2
+
+newmtl NeonRing
+Ka 0.10 0.45 0.45
+Kd 0.25 1.00 0.95
+Ks 0.90 0.90 0.90
+Ns 130
+illum 2
