@@ -2,19 +2,23 @@
 """
 Stylized decorative "neon wave" generator for Roblox.
 
-Builds a smooth, cartoon-style curling ocean wave and exports it as a
+Builds a smooth, cartoon-style crashing ocean wave and exports it as a
 Wavefront OBJ + MTL pair that can be imported straight into Roblox Studio
 (Home -> Import 3D, or the Asset Manager).
 
-Model layout (1 unit = 1 stud, Y = up, the curl silhouette faces +Z):
+Model layout (1 unit = 1 stud, Y = up, the wave face / barrel looks toward +X):
 
-  * WaveBody   - swept tube body: a wall ramp that rises on the left and
-                 curls over into a spiral (classic breaker silhouette)
-  * FoamCrest  - white foam scallops (merged UV spheres) along the outer lip
-  * FoamStreak - small foam blobs scattered in front of the wave base
-  * Puddle     - flattened dark-teal water mound under the wave
-  * NeonRing   - thin glowing ring accent around the puddle (set the "Neon"
-                 material in Studio for an actual glow)
+  * WaveBody  - swept tube: vertical back wall -> crest top -> the lip throws
+                forward (+X), drops and ends in a free-hanging Hokusai hook
+  * Foam      - scalloped foam along the crest + claw droplets on the lip tip
+                + the whitewater splash pile where the lip is about to land
+                + small foam streaks on the water in front
+  * Swell     - the bulging advancing water hump ahead of the wave
+  * Puddle    - flattened dark-teal water base under everything
+  * NeonRing  - thin glowing ring accent around the puddle
+
+All meshes are exported with UVs and face windings oriented outward
+(each closed part's signed volume is checked and flipped if needed).
 
 Outputs: neon_wave.obj / neon_wave.mtl / preview.png (matplotlib render)
 
@@ -32,13 +36,14 @@ MTL_PATH = os.path.join(HERE, "neon_wave.mtl")
 PREVIEW_PATH = os.path.join(HERE, "preview.png")
 
 TAU = math.tau
-X_SHIFT = 0.75   # recentring of the silhouette over the puddle
+X_SHIFT = 0.0   # silhouette already centred over the puddle
 
 # ----------------------------------------------------------------------------- OBJ writer
 
 class ObjBuilder:
     def __init__(self):
         self.verts = []          # list of (x, y, z)
+        self.uvs = []            # list of (u, v)
         self.normals = []        # list of (nx, ny, nz)
         self.groups = []         # list of dicts: name, mtl, faces(0-based)
 
@@ -49,19 +54,25 @@ class ObjBuilder:
     def _current(self):
         return self.groups[-1]
 
-    def add_vertices(self, positions, normals):
+    def _add_geometry(self, positions, normals, uvs):
         offset = len(self.verts)
-        assert len(positions) == len(normals)
         self.verts.extend(map(tuple, positions))
         self.normals.extend(map(tuple, normals))
+        self.uvs.extend(map(tuple, uvs))
         return offset
 
-    def add_faces(self, faces, offset=0):
-        for (a, b, c) in faces:
-            self._current["faces"].append((a + offset, b + offset, c + offset))
+    @staticmethod
+    def _signed_volume(positions, faces):
+        p = np.asarray(positions, dtype=np.float64)
+        f = np.asarray(faces, dtype=np.int64)
+        v0, v1, v2 = p[f[:, 0]], p[f[:, 1]], p[f[:, 2]]
+        return float(np.einsum("ij,ij->i", v0, np.cross(v1, v2)).sum() / 6.0)
 
-    def add_mesh(self, name, mtl, positions, faces):
-        """Add a mesh with smooth averaged vertex normals."""
+    @staticmethod
+    def _flip(faces):
+        return [(a, c, b) for (a, b, c) in faces]
+
+    def _smooth_normals(self, positions, faces):
         positions = np.asarray(positions, dtype=np.float64)
         n = len(positions)
         acc = np.zeros((n, 3))
@@ -76,14 +87,32 @@ class ObjBuilder:
         safe = lens > 1e-12
         norms[safe] = acc[safe] / lens[safe, None]
         norms[~safe] = (0.0, 1.0, 0.0)
-        self.begin_group(name, mtl)
-        off = self.add_vertices(positions, norms)
-        self.add_faces(faces, off)
+        return norms
 
-    def add_mesh_explicit_normals(self, name, mtl, positions, normals, faces):
+    def add_mesh(self, name, mtl, positions, faces, uvs):
+        """Add a mesh; orientation is auto-fixed (signed volume check)."""
+        positions = np.asarray(positions, dtype=np.float64)
+        if self._signed_volume(positions, faces) < 0.0:
+            faces = self._flip(faces)
+        normals = self._smooth_normals(positions, faces)
         self.begin_group(name, mtl)
-        off = self.add_vertices(positions, normals)
-        self.add_faces(faces, off)
+        off = self._add_geometry(positions, normals, uvs)
+        self._add_faces(faces, off)
+
+    def add_mesh_explicit_normals(self, name, mtl, positions, normals, faces, uvs,
+                                  preoriented=False):
+        positions = np.asarray(positions, dtype=np.float64)
+        normals = np.asarray(normals, dtype=np.float64).copy()
+        if not preoriented and self._signed_volume(positions, faces) < 0.0:
+            faces = self._flip(faces)
+            normals = -normals
+        self.begin_group(name, mtl)
+        off = self._add_geometry(positions, normals, uvs)
+        self._add_faces(faces, off)
+
+    def _add_faces(self, faces, offset=0):
+        for (a, b, c) in faces:
+            self._current["faces"].append((a + offset, b + offset, c + offset))
 
     def write(self, obj_path, mtl_name):
         with open(obj_path, "w", encoding="utf-8") as f:
@@ -91,6 +120,8 @@ class ObjBuilder:
             f.write(f"mtllib {mtl_name}\n")
             for v in self.verts:
                 f.write(f"v {v[0]:.5f} {v[1]:.5f} {v[2]:.5f}\n")
+            for uv in self.uvs:
+                f.write(f"vt {uv[0]:.5f} {uv[1]:.5f}\n")
             for n in self.normals:
                 f.write(f"vn {n[0]:.4f} {n[1]:.4f} {n[2]:.4f}\n")
             f.write("s 1\n")
@@ -98,9 +129,8 @@ class ObjBuilder:
                 f.write(f"g {g['name']}\n")
                 f.write(f"usemtl {g['mtl']}\n")
                 for (a, b, c) in g["faces"]:
-                    f.write(
-                        f"f {a + 1}//{a + 1} {b + 1}//{b + 1} {c + 1}//{c + 1}\n"
-                    )
+                    i, j, k = a + 1, b + 1, c + 1
+                    f.write(f"f {i}/{i}/{i} {j}/{j}/{j} {k}/{k}/{k}\n")
 
     def stats(self):
         faces = sum(len(g["faces"]) for g in self.groups)
@@ -116,94 +146,104 @@ def cubic_bezier(p0, p1, p2, p3, n):
     return (mt**3) * p0 + 3 * (mt**2) * t * p1 + 3 * mt * (t**2) * p2 + (t**3) * p3
 
 
+def arc_arc(centre, radius, a0_deg, a1_deg, n):
+    phis = np.linspace(math.radians(a0_deg), math.radians(a1_deg), n)
+    return np.stack([centre[0] + radius * np.cos(phis),
+                     centre[1] + radius * np.sin(phis)], axis=1), phis
+
+
 def build_spine():
-    """Return spine points (N, 2) in the (x, y) plane + spiral centre."""
-    # --- segment A: vertical wall rising on the left, curling forward -------
-    ramp = cubic_bezier(
-        (-1.65, 0.12),   # base on the ground
-        (-1.95, 3.40),   # pulls the wall straight up -> vertical launch
-        (-0.35, 5.65),   # back face leans forward
-        ( 1.95, 6.22),   # lip (joint with the curl)
-        24,
+    """Return full spine (N, 2) in the (x, y) plane as (points, segment ids)."""
+    # segment A: back wall rising on the left, cresting flat on top
+    segA = cubic_bezier(
+        (-2.40, 0.12),   # base on the ground
+        (-2.75, 4.40),   # wall almost vertical, leaning slightly back
+        (-1.70, 6.85),   # rising towards the crest
+        ( 0.35, 6.75),   # flat crest top
+        22,
     )
+    # segment B: the lip throws forward (+x) and drops down
+    segB = cubic_bezier(
+        ( 0.35, 6.75),   # crest top (joint with A)
+        ( 2.25, 6.60),   # lip keeps moving forward
+        ( 3.25, 5.50),   # face of the falling lip
+        ( 3.55, 3.60),   # bottom of the throw
+        16,
+    )
+    # segment C: gentle free-hanging hook (Hokusai claw), ending in open air
+    # arc around centre Fb, from angle beta0 down (clockwise) by sweep
+    Fb = np.array([2.78, 3.30])
+    B3 = segB[-1]
+    radius = float(np.linalg.norm(B3 - Fb))
+    beta0 = math.degrees(math.atan2(B3[1] - Fb[1], B3[0] - Fb[0]))
+    segC, _ = arc_arc(Fb, radius, beta0, beta0 - 150.0, 14)
 
-    # --- segment B: curl, a spiral arc wrapping inward ----------------------
-    centre = np.array([1.68, 4.62])          # centre of the coil (x, y)
-    joint = ramp[-1]
-    r0 = float(np.linalg.norm(joint - centre))
-    phi0 = math.atan2(joint[1] - centre[1], joint[0] - centre[0])
-    sweep = math.radians(245.0)              # how far the lip wraps inward
-    curl_frac = 0.68                          # radius shrink from rim to tip
-
-    n_curl = 34
-    phis = np.linspace(phi0, phi0 + sweep, n_curl + 1)[1:]  # skip duplicate joint
-    pts = []
-    for phi in phis:
-        s = (phi - phi0) / sweep
-        r = r0 * (1.0 - curl_frac * s * s)   # stay wide, tighten late
-        pts.append(centre + r * np.array([math.cos(phi), math.sin(phi)]))
-    curl = np.array(pts)
-
-    spine_xy = np.vstack([ramp, curl])       # (N, 2), x right / y up
-    spine_xy[:, 0] += X_SHIFT
-    centre = centre + np.array([X_SHIFT, 0.0])
-    return spine_xy, centre
+    spine = np.vstack([segA, segB[1:], segC[1:]])
+    spine[:, 0] += X_SHIFT
+    Fb = Fb + np.array([X_SHIFT, 0.0])
+    return spine, Fb
 
 
-def spine_frames(spine_xy):
-    """Unit tangents + perpendicular normals in the (x, y) plane."""
-    t = np.gradient(spine_xy, axis=0)
+def spine_frames(spine):
+    t = np.gradient(spine, axis=0)
     t /= np.linalg.norm(t, axis=1, keepdims=True)
     n = np.stack([-t[:, 1], t[:, 0]], axis=1)
     return t, n
 
 
-def radius_profile(n_ramp, n_total):
-    """Semi-axes along the spine: w = depth (z, extrusion), h = in-plane."""
-    w = np.zeros(n_total)
-    h = np.zeros(n_total)
+def arclen_param(spine):
+    d = np.linalg.norm(np.diff(spine, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(d)])
+    return s / s[-1]
 
-    u = np.linspace(0.0, 1.0, n_ramp)
-    s = 0.5 - 0.5 * np.cos(np.pi * u)
-    w[:n_ramp] = 1.95 + (1.30 - 1.95) * s
-    h[:n_ramp] = 1.55 + (1.02 - 1.55) * s
 
-    u = np.linspace(0.0, 1.0, n_total - n_ramp)
-    s = 0.5 - 0.5 * np.cos(np.pi * u)
-    w[n_ramp:] = 1.30 + (0.26 - 1.30) * s
-    h[n_ramp:] = 1.02 + (0.24 - 1.02) * s
+def radius_profile(spine, seg_idx):
+    """Semi-axes along the spine: w = depth (z extrusion), h = in-plane."""
+    t = arclen_param(spine)
+    # knots on arc-length parameter
+    tk = [0.0, 0.52, 0.72, 1.0]      # base, crest, lip bottom, hook tip
+    wk = [2.15, 1.30, 0.62, 0.30]
+    hk = [1.65, 1.00, 0.50, 0.25]
+    w = np.interp(t, tk, wk)
+    h = np.interp(t, tk, hk)
+    # gentle easing at the knots (smooth already via linear interp + dense rings)
     return w, h
 
 
 # ----------------------------------------------------------------------------- mesh pieces
 
 def build_body(builder):
-    spine_xy, centre = build_spine()
-    n = len(spine_xy)
-    n_ramp = 24
-    tangent, normal = spine_frames(spine_xy)
+    spine, _ = build_spine()
+    n = len(spine)
+    tangent, normal = spine_frames(spine)
 
-    # make sure the in-plane normal faces away from the coil centre
+    centroid = spine.mean(axis=0)
     for i in range(n):
-        out_ref = spine_xy[i] - centre
+        out_ref = spine[i] - centroid
+        if np.linalg.norm(out_ref) < 1e-6:
+            out_ref = np.array([1.0, 0.0])
         if np.dot(normal[i], out_ref) < 0.0:
             normal[i] = -normal[i]
 
-    w, h = radius_profile(n_ramp, n)
+    w, h = radius_profile(spine, None)
 
-    seg = 44                                   # around the ellipse
+    seg = 48                                   # around the ellipse
     theta = np.linspace(0.0, TAU, seg, endpoint=False)
     ct, st = np.cos(theta), np.sin(theta)
 
-    positions = []
+    positions, uvs = [], []
     for i in range(n):
-        sx, sy = spine_xy[i]
+        sx, sy = spine[i]
         nx, ny = normal[i]
+        v = i / (n - 1)
         for j in range(seg):
-            x = sx + h[i] * st[j] * nx
-            y = sy + h[i] * st[j] * ny
-            z = w[i] * ct[j]
-            positions.append((x, y, z))
+            # ellipse: in-plane axis (h) along normal, z axis (w) for depth
+            positions.append((
+                sx + h[i] * st[j] * nx,
+                sy + h[i] * st[j] * ny,
+                w[i] * ct[j],
+            ))
+            uvs.append((j / seg, v))
 
     faces = []
     for i in range(n - 1):
@@ -216,26 +256,27 @@ def build_body(builder):
             faces.append((b, c, d))
 
     pos_list = list(positions)
-    base_idx = len(pos_list)
-    pos_list.append((spine_xy[0][0], spine_xy[0][1], 0.0))
-    tip_idx = len(pos_list)
-    pos_list.append((spine_xy[-1][0], spine_xy[-1][1], 0.0))
+    base_center_idx = len(pos_list)
+    pos_list.append((spine[0][0], spine[0][1], 0.0))
+    uvs.append((0.5, 0.0))
+    tip_center_idx = len(pos_list)
+    pos_list.append((spine[-1][0], spine[-1][1], 0.0))
+    uvs.append((0.5, 1.0))
 
     for j in range(seg):
         a = j
         b = (j + 1) % seg
-        faces.append((base_idx, b, a))                    # base cap (hidden)
+        faces.append((base_center_idx, b, a))
         c = (n - 1) * seg + j
         d = (n - 1) * seg + (j + 1) % seg
-        faces.append((tip_idx, c, d))                     # tip cap
+        faces.append((tip_center_idx, c, d))
 
-    builder.add_mesh("WaveBody", "WaveBody", np.array(pos_list), faces)
-    return spine_xy, normal, h
+    builder.add_mesh("WaveBody", "WaveBody", np.array(pos_list), faces, uvs)
+    return spine, normal, h
 
 
 def sphere_mesh(center, radius, width_segs=18, height_segs=13, squash=(1.0, 1.0, 1.0)):
-    """UV sphere centred at `center`; squash scales each axis."""
-    positions = []
+    positions, uvs = [], []
     for i in range(height_segs + 1):
         phi = math.pi * i / height_segs
         for j in range(width_segs):
@@ -248,6 +289,7 @@ def sphere_mesh(center, radius, width_segs=18, height_segs=13, squash=(1.0, 1.0,
                 center[1] + radius * y,
                 center[2] + radius * z,
             ))
+            uvs.append((j / width_segs, i / height_segs))
     faces = []
     for i in range(height_segs):
         for j in range(width_segs):
@@ -259,109 +301,190 @@ def sphere_mesh(center, radius, width_segs=18, height_segs=13, squash=(1.0, 1.0,
                 faces.append((a, c, b))
             if i != height_segs - 1:
                 faces.append((b, c, d))
-    return positions, faces
+    return positions, faces, uvs
 
 
 def merge_spheres(spheres):
-    """Merge sphere tuples into a single (positions, faces) mesh."""
-    all_pos, all_faces, offset = [], [], 0
+    all_pos, all_faces, all_uvs, offset = [], [], [], 0
     for (center, radius, squash) in spheres:
-        pos, fac = sphere_mesh(center, radius, squash=squash)
+        pos, fac, uv = sphere_mesh(center, radius, squash=squash)
         all_pos.extend(pos)
+        all_uvs.extend(uv)
         all_faces.extend([(a + offset, b + offset, c + offset) for a, b, c in fac])
         offset += len(pos)
-    return np.array(all_pos), all_faces
+    return np.array(all_pos), all_faces, all_uvs
 
 
-def build_foam(builder, spine_xy, normal, h):
-    centre = np.array([1.68, 4.62]) + np.array([X_SHIFT, 0.0])
-    n = len(spine_xy)
+def build_foam(builder, spine, normal, h):
+    n = len(spine)
+    t = arclen_param(spine)
 
     spheres = []
-    # crest band: from the upper ramp over the lip and into the coil
-    idx = np.linspace(int(n * 0.30), n - 1, 15).astype(int)
+    # scalloped crest foam: from mid-crest over the throw and down the hook
+    idx = np.where(t > 0.38)[0]
+    idx = idx[np.linspace(0, len(idx) - 1, 14).astype(int)]
     for k, i in enumerate(idx):
-        sx, sy = spine_xy[i]
+        sx, sy = spine[i]
         nx, ny = normal[i]
-        # scallop wobble so the lip looks hand-drawn, not machined
-        wobble = 0.08 * math.sin(k * 2.4)
-        t = (i - idx[0]) / max(1, idx[-1] - idx[0])
-        radius = 0.36 + 0.33 * math.sin(math.pi * min(1.0, 0.35 + t * 0.85)) + wobble
-        out = h[i] * 0.75 + radius * 0.45
-        spheres.append(((sx + nx * out, sy + ny * out, 0.0), radius, (1.0, 0.95, 1.15)))
+        tt = (t[i] - t[idx[0]]) / max(1e-6, t[idx[-1]] - t[idx[0]])
+        wobble = 0.07 * math.sin(k * 2.6)
+        radius = 0.30 + 0.34 * math.sin(math.pi * min(1.0, 0.12 + tt * 0.98)) + wobble
+        out = h[i] * 0.58 + radius * 0.38
+        spheres.append(((sx + nx * out, sy + ny * out, 0.0), radius, (1.0, 0.92, 1.10)))
 
-    # two bonus blobs near the very tip of the curl (splash inside the coil)
-    tip = spine_xy[-1]
-    spheres.append(((tip[0] + 0.10, tip[1] - 0.05, 0.52), 0.30, (1.0, 0.9, 1.0)))
-    spheres.append(((tip[0] + 0.48, tip[1] + 0.42, -0.30), 0.24, (1.0, 0.9, 1.0)))
-    spheres.append(((tip[0] - 0.30, tip[1] + 0.32, 0.10), 0.20, (1.0, 0.9, 1.0)))
+    # claw droplets breaking off the lip tip
+    tip = spine[-1]
+    spheres.append(((tip[0] + 0.42, tip[1] - 0.42,  0.30), 0.24, (1.0, 1.0, 1.0)))
+    spheres.append(((tip[0] + 0.66, tip[1] + 0.05, -0.28), 0.21, (1.0, 1.0, 1.0)))
+    spheres.append(((tip[0] + 0.18, tip[1] - 0.72,  0.02), 0.18, (1.0, 1.0, 1.0)))
 
-    pos, fac = merge_spheres(spheres)
-    builder.add_mesh("FoamCrest", "Foam", pos, fac)
-
-    # foam streaks sitting on the water in front of the wave
-    streaks = [
-        ((-2.5, 0.52, 3.15), 0.42, (1.5, 0.5, 1.0)),
-        (( 0.3, 0.50, 3.55), 0.34, (1.4, 0.5, 1.0)),
-        (( 2.7, 0.52, 3.10), 0.38, (1.45, 0.5, 1.0)),
+    # whitewater splash pile where the lip is about to land (trough, +x side)
+    splash = [
+        (( 2.45, 1.02,  0.85), 0.55, (1.25, 0.80, 1.10)),
+        (( 3.15, 1.30, -0.25), 0.62, (1.20, 0.75, 1.15)),
+        (( 3.60, 0.80,  1.45), 0.42, (1.30, 0.80, 1.10)),
+        (( 2.15, 0.70, -1.35), 0.42, (1.30, 0.80, 1.15)),
+        (( 4.05, 0.62,  0.55), 0.33, (1.35, 0.80, 1.10)),
     ]
-    pos, fac = merge_spheres(streaks)
-    builder.add_mesh("FoamStreak", "Foam", pos, fac)
+    spheres.extend(splash)
+
+    pos, fac, uv = merge_spheres(spheres)
+    builder.add_mesh("Foam", "Foam", pos, fac, uv)
+
+    # small foam streaks on the water in front of the wave
+    streaks = [
+        ((-2.4, 0.50, 3.20), 0.42, (1.5, 0.5, 1.0)),
+        (( 0.4, 0.47, 3.60), 0.34, (1.4, 0.5, 1.0)),
+        (( 2.9, 0.50, 3.15), 0.38, (1.45, 0.5, 1.0)),
+    ]
+    pos, fac, uv = merge_spheres(streaks)
+    builder.add_mesh("FoamStreak", "Foam", pos, fac, uv)
+
+
+def ellipsoid_mesh(center, radii, width_segs=28, height_segs=18):
+    positions, uvs = [], []
+    for i in range(height_segs + 1):
+        phi = math.pi * i / height_segs * 0.5   # upper hemisphere only
+        for j in range(width_segs):
+            theta = TAU * j / width_segs
+            positions.append((
+                center[0] + math.sin(phi) * math.cos(theta) * radii[0],
+                center[1] + math.cos(phi) * radii[1],
+                center[2] + math.sin(phi) * math.sin(theta) * radii[2],
+            ))
+            uvs.append((j / width_segs, i / height_segs))
+    faces = []
+    for i in range(height_segs):
+        for j in range(width_segs):
+            a = i * width_segs + j
+            b = i * width_segs + (j + 1) % width_segs
+            c = (i + 1) * width_segs + j
+            d = (i + 1) * width_segs + (j + 1) % width_segs
+            if i != 0:
+                faces.append((a, c, b))
+            if i != height_segs - 1:
+                faces.append((b, c, d))
+    # bottom cap ring
+    base_idx = len(positions)
+    positions.append(tuple(center))
+    uvs.append((0.5, 1.0))
+    ring_start = height_segs * width_segs
+    for j in range(width_segs):
+        a = ring_start + j
+        b = ring_start + (j + 1) % width_segs
+        faces.append((base_idx, b, a))
+    return np.array(positions), faces, uvs
+
+
+def build_swell(builder):
+    # advancing water hump that the lip is about to crash onto
+    pos, fac, uv = ellipsoid_mesh((2.9, 0.02, 0.0), (2.55, 1.15, 2.45))
+    builder.add_mesh("Swell", "Swell", pos, fac, uv)
 
 
 def build_puddle(builder):
     seg = 56
-    rx, rz = 5.8, 4.1
-    y0, y1 = 0.0, 0.45
+    rx, rz = 5.6, 4.0
+    y0, y1 = 0.0, 0.42
 
-    side_pos, side_nrm, side_faces = [], [], []
-    for i in range(seg):
+    side_pos, side_nrm, side_faces, side_uvs = [], [], [], []
+    for i in range(seg + 1):   # duplicate seam vertex for clean UVs
         t = TAU * i / seg
-        # slight hand-drawn wobble on the rim
         bump = 1.0 + 0.05 * math.sin(3 * t + 0.7)
         cx, sz = math.cos(t), math.sin(t)
         side_pos.append((rx * bump * cx, y0, rz * bump * sz))
         side_pos.append((rx * bump * cx, y1, rz * bump * sz))
         side_nrm.append((cx, 0.0, sz))
         side_nrm.append((cx, 0.0, sz))
+        side_uvs.append((i / seg, 0.0))
+        side_uvs.append((i / seg, 1.0))
     for i in range(seg):
         a = 2 * i
-        b = (2 * i + 2) % (2 * seg)
+        b = a + 2
         side_faces.append((a, b, a + 1))
         side_faces.append((a + 1, b, b + 1))
 
+    # per-triangle orientation fix: outward = away from the vertical axis
+    side_pos = np.array(side_pos)
+    centroids = side_pos[np.array(side_faces)].mean(axis=1)
+    radial = centroids.copy()
+    radial[:, 1] = 0.0
+    if np.linalg.norm(radial, axis=1).any():
+        radial /= np.linalg.norm(radial, axis=1, keepdims=True)
+    fixed = []
+    for k, (a, b, c) in enumerate(side_faces):
+        n = np.cross(side_pos[b] - side_pos[a], side_pos[c] - side_pos[a])
+        if np.dot(n, radial[k]) < 0.0:
+            fixed.append((a, c, b))
+        else:
+            fixed.append((a, b, c))
+        side_faces = fixed
+
     builder.add_mesh_explicit_normals(
         "PuddleSide", "Puddle",
-        np.array(side_pos), np.array(side_nrm), side_faces,
+        side_pos, np.array(side_nrm), side_faces, side_uvs,
+        preoriented=True,
     )
 
-    # flat caps with their own vertices (hard edges)
-    caps = []
+    # flat caps with their own vertices (hard edges), planar UVs
     for y, sign in ((y1, 1.0), (y0, -1.0)):
         pos = [(0.0, y, 0.0)]
-        for i in range(seg):
+        nrm = [(0.0, sign, 0.0)]
+        uvs = [(0.5, 0.5)]
+        for i in range(seg + 1):
             t = TAU * i / seg
             bump = 1.0 + 0.05 * math.sin(3 * t + 0.7)
-            pos.append((rx * bump * math.cos(t), y, rz * bump * math.sin(t)))
-        pos = np.array(pos)
-        nrm = np.tile(np.array([[0.0, sign, 0.0]]), (seg + 1, 1))
+            x, z = rx * bump * math.cos(t), rz * bump * math.sin(t)
+            pos.append((x, y, z))
+            nrm.append((0.0, sign, 0.0))
+            uvs.append((0.5 + x / (2 * rx * 1.05), 0.5 + z / (2 * rz * 1.05)))
         faces = []
         for i in range(seg):
             a = 1 + i
-            b = 1 + (i + 1) % seg
-            faces.append((0, a, b) if sign > 0 else (0, b, a))
-        caps.append((pos, nrm, faces))
-
-    for pos, nrm, faces in caps:
-        builder.add_mesh_explicit_normals("PuddleCap", "Puddle", pos, nrm, faces)
+            b = a + 1
+            faces.append((0, a, b))
+        pos = np.array(pos)
+        # per-triangle orientation fix: face must look along `sign` in y
+        fixed = []
+        for (a, b, c) in faces:
+            n = np.cross(pos[b] - pos[a], pos[c] - pos[a])
+            if n[1] * sign < 0.0:
+                fixed.append((a, c, b))
+            else:
+                fixed.append((a, b, c))
+        builder.add_mesh_explicit_normals(
+            "PuddleCap", "Puddle",
+            pos, np.array(nrm), fixed, uvs,
+            preoriented=True,
+        )
 
 
 def build_neon_ring(builder):
-    R, r = 4.55, 0.14
-    y = 0.51
+    R, r = 4.35, 0.14
+    y = 0.48
     maj, min_ = 72, 12
 
-    positions, faces = [], []
+    positions, uvs = [], []
     for i in range(maj):
         u = TAU * i / maj
         cu, su = math.cos(u), math.sin(u)
@@ -373,6 +496,8 @@ def build_neon_ring(builder):
                 y + r * sv,
                 (R + r * cv) * su,
             ))
+            uvs.append((i / maj, j / min_))
+    faces = []
     for i in range(maj):
         for j in range(min_):
             a = i * min_ + j
@@ -381,7 +506,7 @@ def build_neon_ring(builder):
             d = ((i + 1) % maj) * min_ + (j + 1) % min_
             faces.append((a, c, b))
             faces.append((b, c, d))
-    builder.add_mesh("NeonRing", "NeonRing", np.array(positions), faces)
+    builder.add_mesh("NeonRing", "NeonRing", np.array(positions), faces, uvs)
 
 
 # ----------------------------------------------------------------------------- materials / preview
@@ -390,6 +515,7 @@ MTL_TEXT = """# Stylized neon wave - materials
 # WaveBody   : saturated teal. In Studio set Material = Neon for a glowing look.
 # NeonRing   : pure neon cyan - set Material = Neon in Studio.
 # Foam       : white foam, smooth plastic looks good (Material = SmoothPlastic).
+# Swell      : wet advancing water, Material = Glass or SmoothPlastic.
 # Puddle     : dark deep-water teal, Material = Glass or SmoothPlastic.
 
 newmtl WaveBody
@@ -406,9 +532,16 @@ Ks 0.25 0.25 0.25
 Ns 35
 illum 2
 
+newmtl Swell
+Ka 0.02 0.10 0.12
+Kd 0.05 0.42 0.52
+Ks 0.65 0.65 0.65
+Ns 80
+illum 2
+
 newmtl Puddle
 Ka 0.01 0.05 0.07
-Kd 0.03 0.30 0.40
+Kd 0.03 0.28 0.38
 Ks 0.60 0.60 0.60
 Ns 70
 illum 2
@@ -442,14 +575,14 @@ def render_preview(obj_path):
                 face_mtl.append(mtl)
 
     v = np.array(v)
-    # matplotlib draws the 3rd axis (plot-z) vertically, so map
-    # model (x, y=up, z) -> plot (x, z, y) to keep the model upright
+    # matplotlib draws the 3rd axis vertically: model (x, y=up, z) -> plot (x, z, y)
     vp = np.stack([v[:, 0], v[:, 2], v[:, 1]], axis=1)
 
     colors = {
         "WaveBody": (0.07, 0.72, 0.82),
         "Foam": (0.96, 0.98, 1.00),
-        "Puddle": (0.03, 0.30, 0.40),
+        "Puddle": (0.03, 0.28, 0.38),
+        "Swell": (0.05, 0.42, 0.52),
         "NeonRing": (0.25, 1.00, 0.95),
     }
 
@@ -457,7 +590,7 @@ def render_preview(obj_path):
     light = light / np.linalg.norm(light)
 
     fig = plt.figure(figsize=(15, 7.2), dpi=110)
-    panels = [(4, 90, "Front view (curl silhouette)"), (16, 35, "Front 3/4 view")]
+    panels = [(4, 90, "Side view (breaking profile)"), (17, 30, "Front 3/4 view")]
     for panel, (elev, azim, title) in enumerate(panels):
         ax = fig.add_subplot(1, 2, panel + 1, projection="3d")
         polys, facecolors = [], []
@@ -472,10 +605,10 @@ def render_preview(obj_path):
             facecolors.append(tuple(np.clip(base * lam, 0, 1)))
         coll = Poly3DCollection(polys, facecolors=facecolors, edgecolors="none")
         ax.add_collection3d(coll)
-        ax.set_xlim(-6, 6.1)
-        ax.set_ylim(-5.3, 5.3)
-        ax.set_zlim(0, 8.6)
-        ax.set_box_aspect((12.1, 10.6, 8.6))
+        ax.set_xlim(-5.9, 5.9)
+        ax.set_ylim(-5.0, 5.0)
+        ax.set_zlim(0, 8.0)
+        ax.set_box_aspect((11.8, 10.0, 8.0))
         ax.view_init(elev=elev, azim=azim)
         ax.set_title(title, fontsize=11, color="#cfe9ee")
         ax.set_axis_off()
@@ -489,8 +622,9 @@ def render_preview(obj_path):
 def main():
     builder = ObjBuilder()
 
-    spine_xy, normal, h = build_body(builder)
-    build_foam(builder, spine_xy, normal, h)
+    spine, normal, h = build_body(builder)
+    build_foam(builder, spine, normal, h)
+    build_swell(builder)
     build_puddle(builder)
     build_neon_ring(builder)
 
